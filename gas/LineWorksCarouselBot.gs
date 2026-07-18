@@ -1,90 +1,71 @@
 /**
  * ============================================================================
- *  LINE WORKS Bot「カルーセルテンプレート（type: carousel）」自動投稿システム
+ *  LINE WORKS Bot カルーセル自動投稿システム（Daily＝内容／Weekly＝スケジュール）
  * ============================================================================
  *
  *  ■ このスクリプトの役割
- *    GitHub 上に置いた投稿データ（JSON）と画像を読み取り、
- *    LINE WORKS Bot の「カルーセルメッセージ」として、指定のトークルーム
- *    （チャンネル）へ自動投稿します。
+ *    Googleスプレッドシートの2つのシートをもとに、LINE WORKS Bot のカルーセルを
+ *    自動投稿します。
+ *      - 「Daily」シート  … カルーセルの内容（朝用・夕用のメッセージとリンク）
+ *      - 「Weekly」シート … 1週間の投稿スケジュール（曜日ごとの朝／夕の時刻）
  *
- *    - ロジック層  : このGoogle Apps Script（GAS）
- *    - データソース: GitHub 上の JSON ファイル（carousel/data.json）
- *    - 画像        : GitHub 上の画像（carousel/images/ …公開HTTPS URLで参照）
- *    - 投稿先      : LINE WORKS のトークルーム／チャンネル
+ *    毎分、Weeklyシートの「今日の曜日」の時刻を見て、その時刻になったら
+ *    Dailyシートの朝／夕の内容を投稿します。
  *
- *  ■ 投稿の仕様（本プロジェクトでの確定事項）
- *    - 1回の送信 = カルーセル1通に「リンク2件（2カード）」を載せて送信します。
- *    - 対象は JSON 内で「承認済み（approved: true）」かつ「まだ投稿していない」項目。
- *    - GitHub は静的なため投稿済みフラグを書き戻せません。代わりに
- *      「投稿済みID」を GAS のスクリプトプロパティ(POSTED_IDS)に記録して管理します。
- *    - 投稿先はトークルーム／チャンネル（channelId）宛。
+ *  ■ 投稿タイミング
+ *    - Weeklyシートに書いた「曜日 × 時刻」に投稿します。
+ *    - 時刻でない値（例：`:` や空欄）が入っている枠は「投稿しない」と判断してスキップします。
+ *    - 時刻を変えたい・曜日を止めたいときは、Weeklyシートを編集するだけ（コード変更不要）。
  *
- * ----------------------------------------------------------------------------
- *  ■ 事前準備 その1：GitHub 側（データと画像の置き場所）
- * ----------------------------------------------------------------------------
- *  このリポジトリ内に以下を用意します（本コミットで雛形を同梱しています）。
- *    - carousel/data.json      … 投稿データ（下記フォーマット）
- *    - carousel/images/*.jpg   … カルーセルに表示する画像（JPEG/PNG）
- *
- *  ● 画像とJSONを「公開HTTPS URL」で読めるようにする方法（どちらか）
- *    (A) GitHub Pages を有効化する（おすすめ・URLがきれい）
- *        Settings → Pages → Source をデフォルトブランチ / (root) に設定。
- *        すると次のURLで公開されます：
- *          https://masp047.github.io/sales_engineer/carousel/data.json
- *          https://masp047.github.io/sales_engineer/carousel/images/sake01.jpg
- *    (B) raw.githubusercontent.com を使う（Pages不要）
- *          https://raw.githubusercontent.com/masp047/sales_engineer/<ブランチ名>/carousel/data.json
- *        ※ ブランチ名に「/」が含まれるとURLが不安定なので、(A) か、
- *          スラッシュを含まないブランチ／タグ／コミットSHA の利用を推奨します。
- *
- *  ● data.json のフォーマット（items は上から順に投稿されます）
- *    {
- *      "imageAspectRatio": "rectangle",   // 全カード共通: rectangle(横長1.51:1) / square(1:1)
- *      "imageSize": "cover",              // 全カード共通: cover(切り抜き) / contain(全体表示)
- *      "items": [
- *        {
- *          "id": "2026-07-01-a",          // ★必須・重複しない一意ID（投稿済み管理に使用）
- *          "approved": true,              // ★true の項目だけが投稿対象
- *          "title": "〇〇酒造 純米大吟醸",   // タイトル（40文字以内）
- *          "text": "華やかな香りの一本",     // 説明文（60文字以内・任意）
- *          "imageUrl": "https://masp047.github.io/sales_engineer/carousel/images/sake01.jpg",
- *          "linkLabel": "詳しく見る",        // ボタンのラベル（20文字以内）
- *          "linkUrl": "https://example.com/item01"  // ボタンの遷移先URL
- *        }
- *      ]
- *    }
+ *  ■ 1回の投稿
+ *    - カルーセル1通・1カード（画像1枚 ＋ リンクボタン2つ）
  *
  * ----------------------------------------------------------------------------
- *  ■ 事前準備 その2：スクリプトプロパティの設定（コード内ハードコード禁止）
+ *  ■ 「Daily」シートの列構成（1行目=見出し、2行目=朝、3行目=夕）
  * ----------------------------------------------------------------------------
- *  Apps Script エディタ →「プロジェクトの設定(歯車)」→「スクリプト プロパティ」で登録。
- *
- *  ┌─────────────────┬──────────────────────────────────────────────────────┐
- *  │ プロパティ名     │ 内容                                                   │
- *  ├─────────────────┼──────────────────────────────────────────────────────┤
- *  │ CLIENT_ID       │ Developer Console の Client ID                         │
- *  │ CLIENT_SECRET   │ Developer Console の Client Secret                     │
- *  │ SERVICE_ACCOUNT │ Service Account のメールアドレス                        │
- *  │ PRIVATE_KEY     │ 秘密鍵（PEM形式。BEGIN〜END を丸ごと貼り付け）            │
- *  │ BOT_ID          │ Bot の ID                                              │
- *  │ TARGET_ID       │ 投稿先のチャンネルID（channelId）                       │
- *  │ JSON_URL        │ data.json の公開URL（上記(A)または(B)のURL）            │
- *  └─────────────────┴──────────────────────────────────────────────────────┘
- *  ※ POSTED_IDS は本スクリプトが自動で作成・更新します（手動設定は不要）。
+ *  ┌───┬────────────┬──────────────────────────────┐
+ *  │ 列 │ 見出し      │ 内容                          │
+ *  ├───┼────────────┼──────────────────────────────┤
+ *  │ A │ 画像URL     │ カードに表示する画像の公開HTTPS直リンク │
+ *  │ B │ リンク1テキスト │ ボタン1の表示名（20文字以内）  │
+ *  │ C │ リンク1URL  │ ボタン1の遷移先URL              │
+ *  │ D │ リンク2テキスト │ ボタン2の表示名（20文字以内）  │
+ *  │ E │ リンク2URL  │ ボタン2の遷移先URL              │
+ *  │ F │ 有効        │ ○ で投稿対象（空欄等は投稿しない）│
+ *  └───┴────────────┴──────────────────────────────┘
+ *  ※ 2行目＝朝用、3行目＝夕用（行の順番で判定します）。
  *
  * ----------------------------------------------------------------------------
- *  ■ 自動実行（トリガー）の設定
+ *  ■ 「Weekly」シートの列構成（1行目=見出し、2行目以降=各曜日）
  * ----------------------------------------------------------------------------
- *    トリガー(時計アイコン) → 追加 → 関数:main / 時間主導型 / 日タイマー で希望時間帯に。
+ *  ┌───┬──────┬──────┐
+ *  │ A │ B    │ C    │
+ *  │曜日│ 朝   │ 夕方 │
+ *  ├───┼──────┼──────┤
+ *  │ 月 │ 8:55 │ 15:55│
+ *  │ … │ …    │ …    │
+ *  │ 土 │ 8:55 │ :    │  ← 夕方は「:」＝投稿しない
+ *  └───┴──────┴──────┘
+ *  ※ 曜日は先頭1文字（月/火/水/木/金/土/日）で判定します（「月曜日」等でもOK）。
+ *  ※ B/C が時刻（HH:mm）ならその時刻に投稿。時刻でなければ（`:`・空欄など）投稿しません。
  *
  * ----------------------------------------------------------------------------
- *  ■ 動作確認の関数（エディタの関数選択から実行）
+ *  ■ スクリプトプロパティ（コード内ハードコード禁止）
  * ----------------------------------------------------------------------------
- *    - testRun()          : 本番と同じ処理を手動実行（実際に投稿する）
- *    - testAuthOnly()     : 認証（アクセストークン取得）だけ試す
- *    - testListTargets()  : 次に投稿される項目を確認（送信しない）
- *    - resetPostedIds()   : 投稿済み記録をリセット（テストのやり直し用）
+ *  CLIENT_ID / CLIENT_SECRET / SERVICE_ACCOUNT / PRIVATE_KEY / BOT_ID /
+ *  TARGET_ID / SHEET_ID
+ *  ＜任意＞ TARGET_TYPE：user=個人宛 / channel=トークルーム宛（未設定なら channel）
+ *  ※ LASTRUN_* は二重投稿防止の自動フラグ（手動設定不要）。
+ *
+ * ----------------------------------------------------------------------------
+ *  ■ 自動実行・動作確認
+ * ----------------------------------------------------------------------------
+ *    - setupTriggers()    : 毎分実行トリガーを作成（最初に1回）
+ *    - tick()             : 毎分自動実行（Weeklyを見て該当時刻に投稿）
+ *    - testAuthOnly()     : 認証だけ試す（送信なし）
+ *    - testListTargets()  : Dailyの内容とWeeklyの予定を表示（送信なし）
+ *    - testPostMorning()  : Dailyの朝の内容を今すぐ投稿（送信あり）
+ *    - testPostEvening()  : Dailyの夕の内容を今すぐ投稿（送信あり）
  * ============================================================================
  */
 
@@ -93,277 +74,229 @@
  *  0. 設定値
  * ==========================================================================*/
 var CONFIG = {
-  CARDS_PER_SEND: 2,             // 1回の送信に載せるカード数（＝リンク件数）
-  DEFAULT_ASPECT_RATIO: 'rectangle', // data.json に指定が無い場合の既定値
-  DEFAULT_IMAGE_SIZE: 'cover',       // 同上
-  POSTED_IDS_PROP: 'POSTED_IDS'  // 投稿済みIDを保存するスクリプトプロパティ名
+  DAILY_SHEET_NAME: 'Daily',    // 内容シートのタブ名（見つからなければ左から1番目を使用）
+  WEEKLY_SHEET_NAME: 'Weekly',  // スケジュールシートのタブ名（見つからなければ左から2番目）
+
+  CATCHUP_MINUTES: 2,           // 実行が数分遅れても取りこぼさない猶予（二重投稿はしない）
+
+  IMAGE_ASPECT_RATIO: 'rectangle',
+  IMAGE_SIZE: 'cover',
+
+  // Dailyシートの列（A=1 ...）
+  DAILY_START_ROW: 2,
+  DAILY_COL: {
+    IMAGE_URL: 1, LINK1_TEXT: 2, LINK1_URL: 3, LINK2_TEXT: 4, LINK2_URL: 5, ENABLED: 6
+  },
+
+  // Weeklyシートの列（A=曜日, B=朝, C=夕）
+  WEEKLY_COL: { DAY: 1, MORNING: 2, EVENING: 3 },
+
+  // 曜日番号(1=月〜7=日) → 曜日ラベル
+  WEEKDAY_JP: { '1': '月', '2': '火', '3': '水', '4': '木', '5': '金', '6': '土', '7': '日' },
+
+  // 投稿スロット定義（Weeklyのどの列を見て、Dailyの何行目を使うか）
+  SLOTS: [
+    { key: 'morning', label: '朝', weeklyCol: 2, dailyIndex: 0 },
+    { key: 'evening', label: '夕', weeklyCol: 3, dailyIndex: 1 }
+  ],
+
+  ENABLED_MARKS: ['○', '〇', '有効', 'TRUE', 'true', '1'],
+  DEFAULT_LINK_TEXT: 'リンク',
+  TIMEZONE: 'Asia/Tokyo'
 };
 
 // LINE WORKS の各種エンドポイント（Bot API v2.0）
 var ENDPOINT = {
   TOKEN: 'https://auth.worksmobile.com/oauth2/v2.0/token',
-  // 投稿先はトークルーム／チャンネル宛
-  MESSAGE: 'https://www.worksapis.com/v1.0/bots/{botId}/channels/{channelId}/messages'
+  MESSAGE_USER: 'https://www.worksapis.com/v1.0/bots/{botId}/users/{userId}/messages',
+  MESSAGE_CHANNEL: 'https://www.worksapis.com/v1.0/bots/{botId}/channels/{channelId}/messages'
 };
 
 
 /* ============================================================================
- *  1. メイン関数（トリガーから毎日呼ばれる入口）
+ *  1. 毎分実行の入口
  * ----------------------------------------------------------------------------
- *  1) GitHub の JSON を読み込む
- *  2) 承認済み かつ 未投稿 の項目を、上から CARDS_PER_SEND 件（=2件）取り出す
- *  3) アクセストークンを取得する
- *  4) 2件を1通のカルーセルにまとめて送信する
- *  5) 送信に成功したら、その項目のIDを「投稿済み」として記録する
+ *  今日の曜日の予定（Weekly）を見て、朝/夕の時刻に一致したら Daily の内容を投稿。
  * ==========================================================================*/
-function main() {
-  Logger.log('=== LINE WORKS カルーセル投稿バッチ 開始 ===');
+function tick() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(0)) return; // 別のtickが実行中なら何もしない（二重投稿防止）
 
-  var props = getProperties_();
-
-  // --- (1) データ取得 --------------------------------------------------------
-  var dataset;
   try {
-    dataset = fetchDataset_(props.JSON_URL);
-  } catch (e) {
-    Logger.log('【データ取得エラー】JSONの読み込みに失敗しました: ' + e.message);
-    Logger.log('=== 異常終了 ===');
-    return;
-  }
+    var now = new Date();
+    var nowMin = minutesOfDay_(now);
+    var weekday = CONFIG.WEEKDAY_JP[Utilities.formatDate(now, CONFIG.TIMEZONE, 'u')]; // 月〜日
+    var today = Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyyMMdd');
 
-  // --- (2) 投稿対象を選ぶ（承認済み・未投稿を上から2件） ----------------------
-  var postedIds = getPostedIds_();
-  var targets = selectTargets_(dataset.items, postedIds, CONFIG.CARDS_PER_SEND);
+    var props;
+    try { props = getProperties_(); } catch (e) { Logger.log(e.message); return; }
 
-  if (targets.length === 0) {
-    Logger.log('投稿対象（承認済み・未投稿）はありませんでした。正常終了します。');
-    Logger.log('=== 終了 ===');
-    return;
-  }
-  Logger.log('今回の投稿対象: ' + targets.length + ' 件（' +
-    targets.map(function (t) { return t.id; }).join(', ') + '）');
-
-  // --- (3) 認証 --------------------------------------------------------------
-  var accessToken;
-  try {
-    accessToken = getAccessToken_(props);
-  } catch (e) {
-    Logger.log('【認証エラー】アクセストークンの取得に失敗しました: ' + e.message);
-    Logger.log('=== 異常終了 ===');
-    return;
-  }
-
-  // --- (4) カルーセルを1通にまとめて送信 -------------------------------------
-  try {
-    postCarousel_(props, accessToken, dataset, targets);
-  } catch (e) {
-    // 送信失敗時は投稿済み記録を更新しない → 次回実行時に自動でリトライされる
-    Logger.log('【投稿失敗】カルーセル送信に失敗しました: ' + e.message + '（次回リトライ対象）');
-    Logger.log('=== 異常終了 ===');
-    return;
-  }
-
-  // --- (5) 投稿済みとして記録 -------------------------------------------------
-  var newlyPosted = targets.map(function (t) { return t.id; });
-  addPostedIds_(newlyPosted);
-  Logger.log('投稿成功。投稿済みに記録: ' + newlyPosted.join(', '));
-  Logger.log('=== 終了 ===');
-}
-
-
-/* ============================================================================
- *  2. データ取得・対象選定
- * ==========================================================================*/
-
-/**
- * GitHub 上の data.json を取得してオブジェクトに変換します。
- */
-function fetchDataset_(jsonUrl) {
-  var response = UrlFetchApp.fetch(jsonUrl, {
-    method: 'get',
-    muteHttpExceptions: true,
-    // GitHub のキャッシュに古い内容が残らないよう毎回取得
-    headers: { 'Cache-Control': 'no-cache' }
-  });
-
-  var code = response.getResponseCode();
-  if (code !== 200) {
-    throw new Error('JSON取得に失敗 (HTTP ' + code + '): ' + response.getContentText().substring(0, 200));
-  }
-
-  var dataset = JSON.parse(response.getContentText());
-  if (!dataset || !Array.isArray(dataset.items)) {
-    throw new Error('JSONの形式が不正です（items 配列が見つかりません）');
-  }
-  return dataset;
-}
-
-/**
- * 「承認済み(approved) かつ 未投稿(IDがpostedIdsに無い)」の項目を、
- * JSONの並び順のまま先頭から limit 件だけ取り出します。
- * 併せて、必須項目(id / imageUrl / linkUrl)が欠けた項目はスキップします。
- */
-function selectTargets_(items, postedIds, limit) {
-  var targets = [];
-
-  for (var i = 0; i < items.length; i++) {
-    if (targets.length >= limit) break; // 必要数（2件）に達したら終了
-
-    var item = items[i];
-    var id = String(item.id || '').trim();
-
-    // 承認されていない／未投稿でない／IDが無い ものは対象外
-    if (item.approved !== true) continue;
-    if (id === '') continue;
-    if (postedIds.indexOf(id) !== -1) continue;
-
-    // カルーセル表示に最低限必要な素材が欠けている項目はスキップ（ログを残す）
-    if (!item.imageUrl || !item.linkUrl) {
-      Logger.log('項目 ' + id + ' は imageUrl または linkUrl が無いためスキップしました。');
-      continue;
+    var ss;
+    try { ss = SpreadsheetApp.openById(props.SHEET_ID); } catch (e) {
+      Logger.log('スプレッドシートを開けません: ' + e.message); return;
     }
 
-    targets.push(item);
+    // 今日の曜日のスケジュール（{morning:'HH:mm'|不正, evening:...}）
+    var schedule = readWeeklyForDay_(ss, weekday);
+    if (!schedule) return; // 今日の曜日がWeeklyに無い
+
+    for (var i = 0; i < CONFIG.SLOTS.length; i++) {
+      var slot = CONFIG.SLOTS[i];
+      var timeStr = schedule[slot.key];
+      if (!isValidTime_(timeStr)) continue; // 「:」や空欄などはスキップ
+
+      var diff = nowMin - hhmmToMinutes_(timeStr);
+      if (diff >= 0 && diff <= CONFIG.CATCHUP_MINUTES) {
+        if (isAlreadyPostedToday_(slot.key, today)) return; // 今日この枠は投稿済み
+        var content = readDaily_(ss)[slot.dailyIndex];      // 朝=0行目 / 夕=1行目
+        var ok = postSlotContent_(props, content, slot.label + '（' + timeStr + '）');
+        if (ok) markPostedToday_(slot.key, today);
+        return;
+      }
+    }
+  } finally {
+    lock.releaseLock();
   }
-  return targets;
 }
 
 
 /* ============================================================================
- *  3. 投稿済みID管理（スクリプトプロパティに保存）
+ *  2. シート読み込み
  * ==========================================================================*/
 
-/** 投稿済みIDの配列を取得します。 */
-function getPostedIds_() {
-  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.POSTED_IDS_PROP);
-  if (!raw) return [];
-  try {
-    var arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    return [];
-  }
+/** タブ名で取得。無ければ左から fallbackIndex 番目のシートを使う。 */
+function getSheet_(ss, name, fallbackIndex) {
+  var sh = ss.getSheetByName(name);
+  if (sh) return sh;
+  var all = ss.getSheets();
+  if (all.length > fallbackIndex) return all[fallbackIndex];
+  throw new Error('シート「' + name + '」が見つかりません');
 }
 
-/** 新たに投稿したIDを、投稿済みリストに追記して保存します。 */
-function addPostedIds_(ids) {
-  var current = getPostedIds_();
-  ids.forEach(function (id) {
-    if (current.indexOf(id) === -1) current.push(id);
+/**
+ * Daily（内容）シートを読み、[{imageUrl,link1Text,link1Url,link2Text,link2Url,enabled}] を返す。
+ * 0番目=朝、1番目=夕（行の順番）。
+ */
+function readDaily_(ss) {
+  var sh = getSheet_(ss, CONFIG.DAILY_SHEET_NAME, 0);
+  var lastRow = sh.getLastRow();
+  if (lastRow < CONFIG.DAILY_START_ROW) return [];
+  var n = lastRow - CONFIG.DAILY_START_ROW + 1;
+  var v = sh.getRange(CONFIG.DAILY_START_ROW, 1, n, CONFIG.DAILY_COL.ENABLED).getValues();
+  return v.map(function (r) {
+    return {
+      imageUrl:  String(r[CONFIG.DAILY_COL.IMAGE_URL - 1] || '').trim(),
+      link1Text: String(r[CONFIG.DAILY_COL.LINK1_TEXT - 1] || '').trim(),
+      link1Url:  String(r[CONFIG.DAILY_COL.LINK1_URL - 1] || '').trim(),
+      link2Text: String(r[CONFIG.DAILY_COL.LINK2_TEXT - 1] || '').trim(),
+      link2Url:  String(r[CONFIG.DAILY_COL.LINK2_URL - 1] || '').trim(),
+      enabled:   isEnabled_(r[CONFIG.DAILY_COL.ENABLED - 1])
+    };
   });
-  PropertiesService.getScriptProperties().setProperty(CONFIG.POSTED_IDS_PROP, JSON.stringify(current));
+}
+
+/**
+ * Weekly（スケジュール）シートから、指定曜日の朝／夕の時刻を返す。
+ * 返り値: { morning: 'HH:mm'|生の値, evening: 'HH:mm'|生の値 } または null
+ */
+function readWeeklyForDay_(ss, weekday) {
+  var sh = getSheet_(ss, CONFIG.WEEKLY_SHEET_NAME, 1);
+  var lastRow = sh.getLastRow();
+  if (lastRow < 1) return null;
+  var v = sh.getRange(1, 1, lastRow, CONFIG.WEEKLY_COL.EVENING).getValues();
+  for (var i = 0; i < v.length; i++) {
+    var day = String(v[i][CONFIG.WEEKLY_COL.DAY - 1] || '').trim();
+    if (day && day.charAt(0) === weekday) { // 「月」でも「月曜日」でも先頭1文字で一致
+      return {
+        morning: normalizeTime_(v[i][CONFIG.WEEKLY_COL.MORNING - 1]),
+        evening: normalizeTime_(v[i][CONFIG.WEEKLY_COL.EVENING - 1])
+      };
+    }
+  }
+  return null;
+}
+
+/** 値が "HH:mm" 形式の有効な時刻か。 */
+function isValidTime_(s) {
+  return /^\d{2}:\d{2}$/.test(String(s || ''));
+}
+
+/**
+ * 時刻の値を "HH:mm" に整える（Date型／"8:55"などに対応）。
+ * 時刻でない値（"："や空欄）はそのまま返す→isValidTime_で弾かれてスキップされる。
+ */
+function normalizeTime_(value) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, CONFIG.TIMEZONE, 'HH:mm');
+  }
+  var s = String(value == null ? '' : value).trim();
+  var m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (m) return ('0' + m[1]).slice(-2) + ':' + m[2];
+  return s;
+}
+
+/** 「有効」列が投稿対象を表すか。 */
+function isEnabled_(value) {
+  if (value === true) return true;
+  var s = String(value == null ? '' : value).trim();
+  return CONFIG.ENABLED_MARKS.indexOf(s) !== -1;
 }
 
 
 /* ============================================================================
- *  4. 認証関連（JWT → アクセストークン取得）
- * ==========================================================================*/
-
-/** アクセストークンを取得して返します。 */
-function getAccessToken_(props) {
-  var jwt = createJwt_(props);
-
-  var payload = {
-    assertion: jwt,
-    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-    client_id: props.CLIENT_ID,
-    client_secret: props.CLIENT_SECRET,
-    scope: 'bot'
-  };
-
-  var response = UrlFetchApp.fetch(ENDPOINT.TOKEN, {
-    method: 'post',
-    contentType: 'application/x-www-form-urlencoded',
-    payload: payload,
-    muteHttpExceptions: true
-  });
-
-  var code = response.getResponseCode();
-  var body = response.getContentText();
-  if (code !== 200) {
-    throw new Error('トークン取得に失敗 (HTTP ' + code + '): ' + body);
-  }
-
-  var json = JSON.parse(body);
-  if (!json.access_token) {
-    throw new Error('レスポンスに access_token がありません: ' + body);
-  }
-  Logger.log('アクセストークンの取得に成功しました。');
-  return json.access_token;
-}
-
-/** JWT を生成します（ヘッダ.クレームを秘密鍵RS256で署名）。 */
-function createJwt_(props) {
-  var header = { alg: 'RS256', typ: 'JWT' };
-  var now = Math.floor(Date.now() / 1000);
-  var claim = {
-    iss: props.CLIENT_ID,
-    sub: props.SERVICE_ACCOUNT,
-    iat: now,
-    exp: now + 60 * 60
-  };
-
-  var signingInput = base64UrlEncode_(JSON.stringify(header)) + '.' +
-                     base64UrlEncode_(JSON.stringify(claim));
-  var privateKey = normalizePrivateKey_(props.PRIVATE_KEY);
-  var signature = base64UrlEncodeBytes_(Utilities.computeRsaSha256Signature(signingInput, privateKey));
-  return signingInput + '.' + signature;
-}
-
-/** 秘密鍵(PEM)の改行がスペース化していても動くよう体裁を整えます。 */
-function normalizePrivateKey_(rawKey) {
-  var key = String(rawKey).trim();
-  if (key.indexOf('\n') !== -1) return key;
-
-  var begin = '-----BEGIN PRIVATE KEY-----';
-  var end = '-----END PRIVATE KEY-----';
-  var body = key.replace(begin, '').replace(end, '').replace(/\s+/g, '');
-  var lines = [];
-  for (var i = 0; i < body.length; i += 64) {
-    lines.push(body.substring(i, i + 64));
-  }
-  return begin + '\n' + lines.join('\n') + '\n' + end;
-}
-
-
-/* ============================================================================
- *  5. 投稿関連（カルーセルを1通にまとめて送信）
+ *  3. 投稿
  * ==========================================================================*/
 
 /**
- * 対象項目（2件）を1つのカルーセルにまとめてチャンネルへ送信します。
- *
- *  カルーセルは columns（カード）の配列を1リクエストで送れるため、
- *  リンクメッセージと違い「2件を1通」で送信できます。
- *  ただしボタン(actions)の数は全カードで揃える必要があります。
+ * Dailyの1件分（朝または夕）をカルーセルとして送信。戻り値: 成功=true。
  */
-function postCarousel_(props, accessToken, dataset, targets) {
-  var url = ENDPOINT.MESSAGE
-    .replace('{botId}', props.BOT_ID)
-    .replace('{channelId}', props.TARGET_ID);
+function postSlotContent_(props, content, label) {
+  if (!content)            { Logger.log(label + '：Dailyに内容がありません'); return false; }
+  if (!content.enabled)    { Logger.log(label + '：有効(○)でないため送信しません'); return false; }
+  if (!content.imageUrl)   { Logger.log(label + '：画像URLがありません'); return false; }
+  if (!content.link1Url && !content.link2Url) { Logger.log(label + '：リンクがありません'); return false; }
 
-  // 各項目を「カルーセルのカード(column)」に変換
-  var columns = targets.map(function (item) {
-    return {
-      thumbnailImageUrl: item.imageUrl,                 // カード上部の画像
-      title: truncate_(item.title, 40),                 // タイトル（40文字以内に丸め）
-      text: truncate_(item.text || ' ', 60),            // 説明文（60文字以内。空だと不可なので半角空白）
-      defaultAction: {                                  // カード全体タップ時の遷移先
-        type: 'uri', label: truncate_(item.linkLabel || 'ひらく', 20), uri: item.linkUrl
-      },
-      actions: [                                        // ボタン（全カード1個で統一）
-        { type: 'uri', label: truncate_(item.linkLabel || 'ひらく', 20), uri: item.linkUrl }
-      ]
-    };
-  });
+  var token;
+  try { token = getAccessToken_(props); }
+  catch (e) { Logger.log(label + '：認証エラー: ' + e.message); return false; }
 
-  // カルーセルメッセージ本体
+  try { postCarousel_(props, token, content); }
+  catch (e) { Logger.log(label + '：送信失敗: ' + e.message); return false; }
+
+  Logger.log('投稿成功（' + label + '）: ' + content.imageUrl);
+  return true;
+}
+
+/** 画像1枚＋ボタン最大2つのカルーセルを、個人／チャンネルへ送信。 */
+function postCarousel_(props, accessToken, item) {
+  var url;
+  if (props.TARGET_TYPE === 'user') {
+    url = ENDPOINT.MESSAGE_USER.replace('{botId}', props.BOT_ID).replace('{userId}', props.TARGET_ID);
+  } else {
+    url = ENDPOINT.MESSAGE_CHANNEL.replace('{botId}', props.BOT_ID).replace('{channelId}', props.TARGET_ID);
+  }
+
+  var actions = [];
+  if (item.link1Url) {
+    actions.push({ type: 'uri', label: truncate_(item.link1Text || (CONFIG.DEFAULT_LINK_TEXT + '1'), 20), uri: item.link1Url });
+  }
+  if (item.link2Url) {
+    actions.push({ type: 'uri', label: truncate_(item.link2Text || (CONFIG.DEFAULT_LINK_TEXT + '2'), 20), uri: item.link2Url });
+  }
+
+  var column = {
+    thumbnailImageUrl: item.imageUrl,
+    text: ' ',
+    defaultAction: actions[0],
+    actions: actions
+  };
+
   var messageBody = {
     content: {
       type: 'carousel',
-      imageAspectRatio: dataset.imageAspectRatio || CONFIG.DEFAULT_ASPECT_RATIO,
-      imageSize: dataset.imageSize || CONFIG.DEFAULT_IMAGE_SIZE,
-      columns: columns
+      imageAspectRatio: CONFIG.IMAGE_ASPECT_RATIO,
+      imageSize: CONFIG.IMAGE_SIZE,
+      columns: [column]
     }
   };
 
@@ -384,13 +317,88 @@ function postCarousel_(props, accessToken, dataset, targets) {
 
 
 /* ============================================================================
- *  6. 共通ユーティリティ
+ *  4. 認証関連（JWT → アクセストークン取得）
  * ==========================================================================*/
 
-/** 必要なスクリプトプロパティをまとめて読み込みます（1つでも欠ければエラー）。 */
+function getAccessToken_(props) {
+  var jwt = createJwt_(props);
+  var payload = {
+    assertion: jwt,
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+    client_id: props.CLIENT_ID,
+    client_secret: props.CLIENT_SECRET,
+    scope: 'bot'
+  };
+  var response = UrlFetchApp.fetch(ENDPOINT.TOKEN, {
+    method: 'post',
+    contentType: 'application/x-www-form-urlencoded',
+    payload: payload,
+    muteHttpExceptions: true
+  });
+  var code = response.getResponseCode();
+  var body = response.getContentText();
+  if (code !== 200) throw new Error('トークン取得に失敗 (HTTP ' + code + '): ' + body);
+  var json = JSON.parse(body);
+  if (!json.access_token) throw new Error('レスポンスに access_token がありません: ' + body);
+  Logger.log('アクセストークンの取得に成功しました。');
+  return json.access_token;
+}
+
+function createJwt_(props) {
+  var header = { alg: 'RS256', typ: 'JWT' };
+  var now = Math.floor(Date.now() / 1000);
+  var claim = { iss: props.CLIENT_ID, sub: props.SERVICE_ACCOUNT, iat: now, exp: now + 60 * 60 };
+  var signingInput = base64UrlEncode_(JSON.stringify(header)) + '.' + base64UrlEncode_(JSON.stringify(claim));
+  var privateKey = normalizePrivateKey_(props.PRIVATE_KEY);
+  var signature = base64UrlEncodeBytes_(Utilities.computeRsaSha256Signature(signingInput, privateKey));
+  return signingInput + '.' + signature;
+}
+
+function normalizePrivateKey_(rawKey) {
+  var key = String(rawKey).trim();
+  if (key.indexOf('\n') !== -1) return key;
+  var begin = '-----BEGIN PRIVATE KEY-----';
+  var end = '-----END PRIVATE KEY-----';
+  var body = key.replace(begin, '').replace(end, '').replace(/\s+/g, '');
+  var lines = [];
+  for (var i = 0; i < body.length; i += 64) lines.push(body.substring(i, i + 64));
+  return begin + '\n' + lines.join('\n') + '\n' + end;
+}
+
+
+/* ============================================================================
+ *  5. トリガー設定
+ * ==========================================================================*/
+
+/** 毎分実行トリガーを作成（既存の同名トリガーは作り直し）。 */
+function setupTriggers() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'tick') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('tick').timeBased().everyMinutes(1).create();
+  Logger.log('毎分トリガーを設定しました。投稿スケジュールはWeeklyシートで管理します。');
+}
+
+
+/* ============================================================================
+ *  6. 二重投稿防止
+ * ==========================================================================*/
+
+function isAlreadyPostedToday_(slotKey, today) {
+  return PropertiesService.getScriptProperties().getProperty('LASTRUN_' + slotKey) === today;
+}
+function markPostedToday_(slotKey, today) {
+  PropertiesService.getScriptProperties().setProperty('LASTRUN_' + slotKey, today);
+}
+
+
+/* ============================================================================
+ *  7. 共通ユーティリティ
+ * ==========================================================================*/
+
 function getProperties_() {
   var sp = PropertiesService.getScriptProperties();
-  var required = ['CLIENT_ID', 'CLIENT_SECRET', 'SERVICE_ACCOUNT', 'PRIVATE_KEY', 'BOT_ID', 'TARGET_ID', 'JSON_URL'];
+  var required = ['CLIENT_ID', 'CLIENT_SECRET', 'SERVICE_ACCOUNT', 'PRIVATE_KEY', 'BOT_ID', 'TARGET_ID', 'SHEET_ID'];
   var props = {};
   var missing = [];
   required.forEach(function (name) {
@@ -398,42 +406,38 @@ function getProperties_() {
     if (!value) missing.push(name);
     props[name] = value;
   });
-  if (missing.length > 0) {
-    throw new Error('スクリプトプロパティが未設定です: ' + missing.join(', '));
-  }
+  if (missing.length > 0) throw new Error('スクリプトプロパティが未設定です: ' + missing.join(', '));
+  var targetType = String(sp.getProperty('TARGET_TYPE') || 'channel').trim().toLowerCase();
+  props.TARGET_TYPE = (targetType === 'user') ? 'user' : 'channel';
   return props;
 }
 
-/** 文字列を最大文字数で丸めます（超過分は … に置き換え）。 */
+function minutesOfDay_(date) {
+  var hh = parseInt(Utilities.formatDate(date, CONFIG.TIMEZONE, 'HH'), 10);
+  var mm = parseInt(Utilities.formatDate(date, CONFIG.TIMEZONE, 'mm'), 10);
+  return hh * 60 + mm;
+}
+function hhmmToMinutes_(hhmm) {
+  var p = String(hhmm).split(':');
+  return parseInt(p[0], 10) * 60 + parseInt(p[1], 10);
+}
 function truncate_(str, max) {
   var s = String(str == null ? '' : str);
-  if (s.length <= max) return s;
-  return s.substring(0, max - 1) + '…';
+  return s.length <= max ? s : s.substring(0, max - 1) + '…';
 }
-
-/** 文字列を Base64URL 形式にエンコードします。 */
 function base64UrlEncode_(str) {
   return base64UrlEncodeBytes_(Utilities.newBlob(str).getBytes());
 }
-
-/** バイト配列を Base64URL 形式にエンコードします。 */
 function base64UrlEncodeBytes_(bytes) {
-  return Utilities.base64Encode(bytes)
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return Utilities.base64Encode(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 
 /* ============================================================================
- *  7. テスト用（手動実行）関数
+ *  8. テスト用（手動実行）関数
  * ==========================================================================*/
 
-/** 【手動テスト】本番と同じ処理を実行（実際に投稿します）。 */
-function testRun() {
-  Logger.log('※ testRun: 本番と同じ処理を手動実行します。');
-  main();
-}
-
-/** 【手動テスト】認証だけを試します（送信なし）。 */
+/** 【テスト】認証だけ試す（送信なし）。 */
 function testAuthOnly() {
   try {
     var props = getProperties_();
@@ -444,23 +448,87 @@ function testAuthOnly() {
   }
 }
 
-/** 【手動テスト】次に投稿される項目を一覧表示します（送信なし）。 */
+/** 【テスト】Dailyの内容とWeeklyの予定を表示（送信なし）。 */
 function testListTargets() {
   try {
     var props = getProperties_();
-    var dataset = fetchDataset_(props.JSON_URL);
-    var targets = selectTargets_(dataset.items, getPostedIds_(), CONFIG.CARDS_PER_SEND);
-    Logger.log('次回の投稿対象: ' + targets.length + ' 件');
-    targets.forEach(function (t) {
-      Logger.log('  [' + t.id + '] ' + t.title + ' → ' + t.linkUrl);
+    var ss = SpreadsheetApp.openById(props.SHEET_ID);
+
+    var daily = readDaily_(ss);
+    ['朝', '夕'].forEach(function (label, i) {
+      var c = daily[i];
+      if (!c) { Logger.log('【Daily】' + label + '：内容なし'); return; }
+      Logger.log('【Daily】' + label + '：画像=' + c.imageUrl + '（有効=' + c.enabled + '）');
+      Logger.log('   リンク1[' + c.link1Text + '] ' + c.link1Url);
+      Logger.log('   リンク2[' + c.link2Text + '] ' + c.link2Url);
     });
+
+    var sh = getSheet_(ss, CONFIG.WEEKLY_SHEET_NAME, 1);
+    var v = sh.getRange(1, 1, sh.getLastRow(), CONFIG.WEEKLY_COL.EVENING).getValues();
+    Logger.log('【Weekly】曜日 / 朝 / 夕（時刻でない値は投稿しない）');
+    v.forEach(function (r) { Logger.log('   ' + r[0] + ' / ' + r[1] + ' / ' + r[2]); });
   } catch (e) {
     Logger.log('確認NG: ' + e.message);
   }
 }
 
-/** 【手動テスト】投稿済み記録をすべて消去します（テストのやり直し用）。 */
-function resetPostedIds() {
-  PropertiesService.getScriptProperties().deleteProperty(CONFIG.POSTED_IDS_PROP);
-  Logger.log('投稿済み記録(POSTED_IDS)をリセットしました。');
+/** 【テスト】Dailyの朝の内容を今すぐ投稿（時刻に関係なく送信）。 */
+function testPostMorning() {
+  var props = getProperties_();
+  var daily = readDaily_(SpreadsheetApp.openById(props.SHEET_ID));
+  postSlotContent_(props, daily[0], '朝（テスト）');
+}
+
+/** 【テスト】Dailyの夕の内容を今すぐ投稿（時刻に関係なく送信）。 */
+function testPostEvening() {
+  var props = getProperties_();
+  var daily = readDaily_(SpreadsheetApp.openById(props.SHEET_ID));
+  postSlotContent_(props, daily[1], '夕（テスト）');
+}
+
+
+/* ============================================================================
+ *  9. トークルームの channelId 取得（初期セットアップ用）
+ * ----------------------------------------------------------------------------
+ *  既存のトークルームに配信するには、そのルームの channelId が必要です。
+ *  以下の手順で取得します（1回だけの作業）。
+ *   1. このスクリプトを「ウェブアプリ」としてデプロイし、URLを取得
+ *      （デプロイ → 新しいデプロイ → 種類:ウェブアプリ →
+ *        次のユーザーとして実行:自分 / アクセスできるユーザー:全員）
+ *   2. LINE WORKS Developer Console の Bot 設定で、Callback URL に上記URLを設定し、
+ *      「メッセージ」イベントを ON にして保存
+ *   3. 投稿したいトークルームに Bot を招待する
+ *   4. そのトークルームで「テスト」など何かメッセージを送る
+ *      → 下の doPost がイベントを受け取り、channelId を保存します
+ *   5. 関数 showCapturedChannelId() を実行し、ログに出た channelId を控える
+ *   6. スクリプトプロパティ TARGET_ID にその channelId を、TARGET_TYPE に channel を設定
+ *  ※ channelId を取得できたら、Callback は無効に戻しても構いません。
+ * ==========================================================================*/
+
+/** LINE WORKS からのイベント受信。ルームのメッセージ等から channelId を保存します。 */
+function doPost(e) {
+  try {
+    var body = JSON.parse(e.postData.contents);
+    var channelId = body && body.source && body.source.channelId;
+    if (channelId) {
+      PropertiesService.getScriptProperties().setProperty('CAPTURED_CHANNEL_ID', channelId);
+      Logger.log('channelId を取得・保存しました: ' + channelId);
+    } else {
+      Logger.log('channelId が含まれていませんでした（個人トークの可能性）: ' + e.postData.contents);
+    }
+  } catch (err) {
+    Logger.log('doPost error: ' + err.message);
+  }
+  return ContentService.createTextOutput('OK');
+}
+
+/** 【セットアップ】取得済みの channelId をログに表示します。 */
+function showCapturedChannelId() {
+  var id = PropertiesService.getScriptProperties().getProperty('CAPTURED_CHANNEL_ID');
+  if (id) {
+    Logger.log('取得済み channelId: ' + id);
+    Logger.log('→ スクリプトプロパティ TARGET_ID にこの値、TARGET_TYPE に channel を設定してください。');
+  } else {
+    Logger.log('まだ取得できていません。ウェブアプリのデプロイ→Callback設定→Botをルームに招待→ルームでメッセージ送信、を確認してください。');
+  }
 }
